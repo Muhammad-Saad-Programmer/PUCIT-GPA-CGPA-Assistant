@@ -1,99 +1,73 @@
 # PUCIT BS(CS) GPA & CGPA Assistant
 
-A simple Streamlit assistant for calculating GPA, CGPA, grades, and credit-hour information for PUCIT BS(CS) students.
+Ask about marks, semester GPA, projected CGPA, target GPA, courses, and graded credit hours from the terminal or Streamlit. Both interfaces use the same LangChain agent. Groq handles the conversation, and a local FastMCP server performs the calculations and course lookups.
 
-## Main Features
+## Setup
 
-- Convert marks into grade points
-- Calculate semester GPA
-- Project a new CGPA
-- Calculate the GPA needed to reach a target CGPA
-- View semester courses and credit hours
-- Calculate remaining credit hours
-- Save a useful GPA or CGPA report when requested
-
-## Technologies Used
-
-- Python
-- Streamlit
-- LangChain
-- Groq API
-- python-dotenv
-
-## Project Structure
-
-```text
-assignment_02/
-├── app.py       # Streamlit user interface and chat handling
-├── agent.py     # GPA assistant agent and instructions
-├── llm.py       # Groq language model configuration
-├── tools.py     # GPA, CGPA, grade, course, and report tools
-└── README.md    # Project documentation
-```
-
-## Installation
-
-1. Clone or download this project.
-2. Open a terminal in the project folder.
-3. Create a virtual environment:
-
-	```bash
-	python -m venv .venv
-	```
-
-4. Activate the virtual environment.
-
-	On Linux/macOS:
-
-	```bash
-	source .venv/bin/activate
-	```
-
-	On Windows:
-
-	```powershell
-	.venv\Scripts\activate
-	```
-
-5. Install the required packages:
-
-	```bash
-	python -m pip install streamlit langchain langchain-groq python-dotenv
-	```
-
-## Configure the `.env` File
-
-Create a file named `.env` in the project folder and add your Groq API key:
-
-```env
-GROQ_API_KEY=your_groq_api_key_here
-```
-
-Replace `your_groq_api_key_here` with your actual API key.
-
-## Run the App
-
-Start the Streamlit app with:
+From the repository root, create a virtual environment using Python 3.12 (the version used to test this project).
 
 ```bash
-python -m streamlit run app.py
+python -m venv .venv
 ```
 
-On Windows, use the virtual-environment interpreter to avoid loading packages
-from a different Python installation:
+Activate it in each terminal. On Linux or macOS, run `source .venv/bin/activate`. On Windows PowerShell, run `.\.venv\Scripts\Activate.ps1`. Install the agent, app, and server dependencies together:
 
-```powershell
-.venv\Scripts\python.exe -m streamlit run app.py
+```bash
+python -m pip install -r requirements.txt -r server/requirements.txt
 ```
 
-Then open the local URL shown in the terminal.
+For chat, create a local `.env` beside `agent.py` using `.env.example` as the template. Set your Groq key and the MCP endpoint:
 
-For the terminal conversation, run `python agent.py`. Both interfaces use the
-same Groq model and require an internet connection for chat.
+```dotenv
+GROQ_API_KEY=your_groq_api_key_here
+MCP_URL=http://127.0.0.1:8000/mcp
+```
+
+## Run the assistant
+
+**Terminal 1 — MCP server.** From the repository root, run:
+
+```bash
+cd server
+python server.py
+```
+
+Leave this terminal running while using either chat interface.
+
+**Terminal 2 — chat.** From the repository root with the same environment active, choose an interface:
+
+| Interface | Command | How to use it |
+|---|---|---|
+| Terminal | `python agent.py` | Choose a student name to open a saved chat. Type `exit` to quit. |
+| Streamlit | `python -m streamlit run app.py` | Open the local URL printed in the terminal. Use **Clear Conversation** to start again. |
+
+The terminal saves chats in `cgpa_memory.sqlite` beside `agent.py`. Choose the same student name after a restart to resume. Use `/switch <name>` to change chats, `/history` to read the current chat, or `/forget` to permanently delete it. Streamlit keeps its own browser-session history. **Clear Conversation** resets that session.
+
+Both chat interfaces need internet access to Groq. To check the running MCP server independently of Groq or an API key, run these commands from the activated environment:
+
+```bash
+fastmcp list http://127.0.0.1:8000/mcp
+fastmcp call http://127.0.0.1:8000/mcp get_remaining_credit_hours current_semester=5
+```
+
+Expect seven tools and **51.5** graded hours remaining after semester 5. To check only the server in a separate environment, install `server/requirements.txt`.
+
+## Where to make changes
+
+| File | Role |
+|---|---|
+| `server/tools.py` | Course data, grading rules, GPA calculations, and report writing used by MCP. |
+| `server/server.py` | Registers the seven tools and starts the HTTP endpoint. |
+| `agent.py` | System prompt, model retry middleware, MCP discovery, async turns, and CLI. |
+| `llm.py` | Loads the environment and opens the Groq model client. |
+| `app.py` | Streamlit chat UI and session history. |
+| `tools.py` | Standalone GPA and course functions. The running server imports its own copy in `server/`. |
+
+Relative report filenames resolve from the repository root. Ask for a path such as `reports/gpa.txt` to save inside the Git-ignored reports folder. The server creates that folder on the first such save.
 
 ## Prompts to test the assistant
 
-Start each row in a fresh conversation using **Clear Conversation** (or restart the CLI).
+Start each row in a fresh conversation using **Clear Conversation** in Streamlit or a new student name in the CLI.
 Send follow-ups in the same chat. Compare the result and behavior, allowing for different wording.
 
 | Try this prompt | What to check |
@@ -113,14 +87,14 @@ Send follow-ups in the same chat. Compare the result and behavior, allowing for 
 | What courses are in semester 9? | Explain that the scheme covers **semesters 1–8**. |
 | Calculate my GPA from grade points [4.0, 3.0] and credit hours [3.0]. | Ask for the missing credit value or a corrected list. No GPA can be calculated yet. |
 | My CGPA is 4.5 after 64 credits. If I get 3.6 over 18.5 credits, what will my CGPA be? | Ask for a current CGPA in **0–4**. |
-| Can you calculate how repeating a course will replace my old grade? | Explain the assignment's scope and redirect to a supported GPA task. Repeat with a grading curve, withdrawal, or unrelated question. |
+| Can you calculate how repeating a course will replace my old grade? | Explain which GPA questions the assistant can help with. Repeat with a grading curve, withdrawal, or unrelated question. |
 
 ### Multi-turn target plan, report saving, and reset
 
 1. Ask **“What GPA do I need this semester?”** Expect one or two clarifying questions.
 2. Reply **“I'm in semester 5. My CGPA is 3.0 and my target is 3.4.”** It still needs your actual completed credits.
 3. Reply **“I've completed 64 credits. I follow the standard scheme.”** The first feasible window ends in **semester VII**, with an average of about **3.86**. For checking the calculation, semester V alone requires **4.78**, and V–VI requires **4.09**. The reply can summarize the first feasible window.
-4. At this point it should offer to save the plan and wait for permission. Reply **“Save this plan as viva_gpa_test.txt.”** Use a new filename. Open the file in the project folder and verify it contains the target and the semester VII plan.
+4. At this point it should offer to save the plan and wait for permission. Reply **“Save this plan as reports/viva_gpa_test.txt.”** Use a new filename. Open the file in the reports folder and verify it contains the target and the semester VII plan.
 5. Clear the conversation and ask **“What was my target CGPA?”** It should ask you for the target again.
 
 ## Scope

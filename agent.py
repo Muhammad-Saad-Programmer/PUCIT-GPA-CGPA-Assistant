@@ -1,11 +1,14 @@
 import asyncio
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import wrap_model_call
 from langchain.mcp import MCPAdapter
 from langchain.messages import HumanMessage, SystemMessage
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.graph import START
 from groq import APIError, BadRequestError
 
 from llm import open_model
@@ -68,7 +71,7 @@ async def require_model_reply(request, handler):
 
 
 @asynccontextmanager
-async def open_agent():
+async def open_agent(checkpointer=None):
     """Discover remote tools and attach them to the GPA agent."""
     server = os.getenv("MCP_URL", "http://127.0.0.1:8000/mcp")
     tools = await MCPAdapter(server).list_tools()
@@ -78,6 +81,7 @@ async def open_agent():
             tools=tools,
             system_prompt=SYSTEM_PROMPT,
             middleware=[require_model_reply],
+            checkpointer=checkpointer,
         )
 
 
@@ -87,37 +91,82 @@ async def invoke_turn(messages):
         return await agent.ainvoke({"messages": messages})
 
 
+async def select_thread(agent, name):
+    config = {"configurable": {"thread_id": name}}
+    state = await agent.aget_state(config)
+    if state.created_at is None:
+        await agent.aupdate_state(config, {"messages": []}, as_node=START)
+    return config
+
+
+async def show_history(agent, config):
+    state = await agent.aget_state(config)
+    messages = state.values.get("messages", [])
+    if not messages:
+        print("No saved messages.")
+    for message in messages:
+        print(message.pretty_repr())
+
+
 async def chat():
-    async with open_agent() as agent:
-        await chat_loop(agent)
+    database = Path(__file__).resolve().with_name("cgpa_memory.sqlite")
+    async with AsyncSqliteSaver.from_conn_string(str(database)) as memory:
+        names = {
+            entry.config["configurable"]["thread_id"]
+            async for entry in memory.alist(None)
+        }
+        print("Saved chats:", ", ".join(sorted(names)) or "(none)")
+        try:
+            name = input("Who is chatting? ").strip()
+            while not name:
+                name = input("Enter a student name: ").strip()
+        except EOFError:
+            return
+        async with open_agent(memory) as agent:
+            await chat_loop(agent, memory, name)
 
 
-async def chat_loop(agent):
-    messages = []
-
+async def chat_loop(agent, memory, name):
+    config = await select_thread(agent, name)
     print("GPA/CGPA Assistant")
-    print("Type 'exit' to quit.")
+    print("Commands: /switch <name>, /history, /forget, exit")
 
     while True:
         try:
-            user_input = input("\nYou: ").strip()
+            user_input = input(f"\n{name}> ").strip()
         except EOFError:
             break
 
         if user_input.lower() == "exit":
             break
-
         if not user_input:
             continue
+        command = user_input.split(maxsplit=1)
+        if command[0] == "/switch":
+            if len(command) == 1:
+                print("Usage: /switch <name>")
+            else:
+                name = command[1]
+                config = await select_thread(agent, name)
+                print(f"Switched to {name}.")
+            continue
+        if user_input == "/history":
+            await show_history(agent, config)
+            continue
+        if user_input == "/forget":
+            await memory.adelete_thread(name)
+            print(f"Deleted the chat for {name}. Your next message starts a fresh chat.")
+            continue
+
         try:
-            result = await agent.ainvoke({"messages": [*messages, HumanMessage(content=user_input)]})
+            result = await agent.ainvoke(
+                {"messages": [HumanMessage(content=user_input)]}, config=config
+            )
         except (APIError, ValueError) as error:
             print(f"Request failed ({type(error).__name__}): {error}")
             continue
 
-        messages = result["messages"]
-
-        print("\nAssistant:", messages[-1].text)
+        print("\nAssistant:", result["messages"][-1].text)
 
 
 if __name__ == "__main__":
