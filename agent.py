@@ -4,9 +4,9 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from langchain.agents import create_agent
-from langchain.agents.middleware import wrap_model_call
+from langchain.agents.middleware import wrap_model_call, wrap_tool_call
 from langchain.mcp import MCPAdapter
-from langchain.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage
+from langchain.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import START
 from groq import APIError, BadRequestError
@@ -70,20 +70,48 @@ async def require_model_reply(request, handler):
     raise ValueError("Groq returned no usable reply after two attempts. Please retry your question.")
 
 
+OUTAGE_MESSAGE = "The GPA tool server is temporarily unavailable. Please try again."
+MCP_TIMEOUT = 20
+
+
+class MCPUnavailable(Exception):
+    """A discovery or execution failure at the remote tool boundary."""
+
+
+@wrap_tool_call
+async def guard_mcp_call(request, handler):
+    try:
+        async with asyncio.timeout(MCP_TIMEOUT):
+            response = await handler(request)
+    except Exception:
+        raise MCPUnavailable(OUTAGE_MESSAGE) from None
+    if isinstance(response, ToolMessage) and response.status == "error":
+        raise MCPUnavailable(OUTAGE_MESSAGE)
+    return response
+
+
 @asynccontextmanager
-async def open_agent(checkpointer=None):
-    """Discover remote tools and attach them to the GPA agent."""
+async def open_agent(checkpointer=None, *, history_only=False):
+    """Skip network discovery for the CLI graph that only reads and edits history."""
     server = os.getenv(
         "MCP_URL",
         "https://pucit-gpa-cgpa-assistant-production.up.railway.app/mcp",
     )
-    tools = await MCPAdapter(server).list_tools()
+    tools = []
+    if not history_only:
+        try:
+            async with asyncio.timeout(MCP_TIMEOUT):
+                tools = await MCPAdapter(server).list_tools()
+        except Exception:
+            raise MCPUnavailable(OUTAGE_MESSAGE) from None
+        if not tools:
+            raise MCPUnavailable(OUTAGE_MESSAGE)
     async with open_model() as model:
         yield create_agent(
             model=model,
             tools=tools,
             system_prompt=SYSTEM_PROMPT,
-            middleware=[require_model_reply],
+            middleware=[require_model_reply, guard_mcp_call],
             checkpointer=checkpointer,
         )
 
@@ -146,11 +174,41 @@ async def stream_browser_turn(messages, on_text, on_status):
     return [*messages, *completed]
 
 
+async def repair_tool_history(agent, config, state):
+    """Patch unfinished calls in place, keeping matched results and later turns."""
+    messages = state.values.get("messages", [])
+    replacements = []
+    for index, message in enumerate(messages):
+        if not isinstance(message, AIMessage) or not message.tool_calls:
+            continue
+        answered = set()
+        pos = index + 1
+        while pos < len(messages) and isinstance(messages[pos], ToolMessage):
+            answered.add(messages[pos].tool_call_id)
+            pos += 1
+        matched = [call for call in message.tool_calls if call["id"] in answered]
+        if len(matched) == len(message.tool_calls):
+            continue
+        if matched:
+            # Groq also accepts raw provider tool_calls. Keep only normalized calls.
+            extra = dict(message.additional_kwargs)
+            extra.pop("tool_calls", None)
+            replacements.append(message.model_copy(
+                update={"tool_calls": matched, "additional_kwargs": extra}
+            ))
+        else:
+            replacements.append(AIMessage(id=message.id, content=OUTAGE_MESSAGE))
+    if replacements:
+        await agent.aupdate_state(config, {"messages": replacements}, as_node=START)
+
+
 async def select_thread(agent, name):
     config = {"configurable": {"thread_id": name}}
     state = await agent.aget_state(config)
     if state.created_at is None:
         await agent.aupdate_state(config, {"messages": []}, as_node=START)
+    else:
+        await repair_tool_history(agent, config, state)
     return config
 
 
@@ -180,12 +238,12 @@ async def chat():
                 name = input("Enter a student name: ").strip()
         except EOFError:
             return
-        async with open_agent(memory) as agent:
-            await chat_loop(agent, memory, name)
+        async with open_agent(memory, history_only=True) as history:
+            await chat_loop(history, memory, name)
 
 
-async def chat_loop(agent, memory, name):
-    config = await select_thread(agent, name)
+async def chat_loop(history, memory, name):
+    config = await select_thread(history, name)
     print("GPA/CGPA Assistant")
     print("Commands: /switch <name>, /history, /forget, exit")
 
@@ -205,11 +263,11 @@ async def chat_loop(agent, memory, name):
                 print("Usage: /switch <name>")
             else:
                 name = command[1]
-                config = await select_thread(agent, name)
+                config = await select_thread(history, name)
                 print(f"Switched to {name}.")
             continue
         if user_input == "/history":
-            await show_history(agent, config)
+            await show_history(history, config)
             continue
         if user_input == "/forget":
             await memory.adelete_thread(name)
@@ -234,7 +292,12 @@ async def chat_loop(agent, memory, name):
                 print(status, flush=True)
 
         try:
-            await stream_turn(agent, [HumanMessage(content=user_input)], config, write_text, write_status)
+            async with open_agent(memory) as agent:
+                await stream_turn(agent, [HumanMessage(content=user_input)], config, write_text, write_status)
+        except MCPUnavailable:
+            state = await history.aget_state(config)
+            await repair_tool_history(history, config, state)
+            print("\n" + OUTAGE_MESSAGE)
         except (APIError, ValueError):
             print("\nCould not complete your request. Please try again.")
         else:

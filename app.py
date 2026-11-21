@@ -34,7 +34,7 @@ if question:
     st.chat_message("user").markdown(question)
     with st.chat_message("assistant"):
         try:
-            from agent import stream_browser_turn
+            from agent import MCPUnavailable, OUTAGE_MESSAGE, stream_browser_turn
 
             messages = st.session_state.messages + [HumanMessage(content=question)]
             status = st.empty()
@@ -55,6 +55,9 @@ if question:
                 st.session_state.messages = asyncio.run(
                     stream_browser_turn(messages, display_text, display_status)
                 )
+            except MCPUnavailable:
+                reply.markdown(OUTAGE_MESSAGE)
+                st.session_state.messages = [*messages, AIMessage(content=OUTAGE_MESSAGE)]
             finally:
                 status.empty()
         except ImportError:
