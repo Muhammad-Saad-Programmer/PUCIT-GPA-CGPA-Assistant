@@ -26,7 +26,7 @@ with st.sidebar:
 for message in st.session_state.messages:
     if isinstance(message, HumanMessage):
         st.chat_message("user").markdown(message.text)
-    elif isinstance(message, AIMessage) and message.text:
+    elif isinstance(message, AIMessage) and not message.tool_calls and message.text:
         st.chat_message("assistant").markdown(message.text)
 
 question = st.chat_input("Ask about your GPA or CGPA...")
@@ -34,14 +34,30 @@ if question:
     st.chat_message("user").markdown(question)
     with st.chat_message("assistant"):
         try:
-            from agent import invoke_turn
+            from agent import stream_browser_turn
 
             messages = st.session_state.messages + [HumanMessage(content=question)]
-            with st.spinner("Thinking..."):
-                result = asyncio.run(invoke_turn(messages))
-            st.session_state.messages = result["messages"]
-            st.markdown(st.session_state.messages[-1].text)
+            status = st.empty()
+            reply = st.empty()
+            parts = []
+
+            def display_text(text):
+                parts.append(text)
+                reply.markdown("".join(parts))
+
+            def display_status(text):
+                if text:
+                    status.caption(text)
+                else:
+                    status.empty()
+
+            try:
+                st.session_state.messages = asyncio.run(
+                    stream_browser_turn(messages, display_text, display_status)
+                )
+            finally:
+                status.empty()
         except ImportError:
             st.error("Install the packages listed in the README, then retry.")
-        except Exception as error:
-            st.error(f"Could not complete your request: {error}")
+        except Exception:
+            st.error("Could not complete your request. Please try again.")

@@ -6,7 +6,7 @@ from pathlib import Path
 from langchain.agents import create_agent
 from langchain.agents.middleware import wrap_model_call
 from langchain.mcp import MCPAdapter
-from langchain.messages import HumanMessage, SystemMessage
+from langchain.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import START
 from groq import APIError, BadRequestError
@@ -85,10 +85,62 @@ async def open_agent(checkpointer=None):
         )
 
 
-async def invoke_turn(messages):
-    """Run a Streamlit turn with discovery and invocation on the same event loop."""
+TOOL_STATUS = {
+    "marks_to_grade_points": "Converting marks to grade points...",
+    "calculate_semester_gpa": "Calculating the semester GPA...",
+    "calculate_new_cgpa": "Calculating the projected CGPA...",
+    "required_gpa_for_target": "Calculating the GPA needed for your target...",
+    "get_semester_courses": "Looking up semester courses...",
+    "get_remaining_credit_hours": "Calculating the remaining credit hours...",
+    "save_report": "Saving your report...",
+}
+
+
+async def stream_turn(agent, messages, config, on_text, on_status):
+    """Display one turn and return its completed node messages for the browser UI."""
+    completed = []
+    streamed_text = False
+    async for chunk in agent.astream(
+        {"messages": messages}, config, stream_mode=["updates", "messages"], version="v2"
+    ):
+        data = chunk.get("data")
+        if chunk.get("type") == "messages":
+            if not isinstance(data, (tuple, list)) or len(data) != 2:
+                continue
+            token, metadata = data
+            if (isinstance(metadata, dict) and metadata.get("langgraph_node") == "model"
+                    and isinstance(token, AIMessageChunk) and not token.tool_call_chunks
+                    and token.text):
+                on_text(token.text)
+                streamed_text = True
+
+        elif chunk.get("type") == "updates" and isinstance(data, dict):
+            for node, update in data.items():
+                if not isinstance(update, dict):
+                    continue
+                outputs = update.get("messages")
+                if not isinstance(outputs, (tuple, list)):
+                    continue
+                completed.extend(outputs)
+                if node == "tools":
+                    on_status("")
+                for message in outputs:
+                    if node != "model" or not isinstance(message, AIMessage):
+                        continue
+                    if message.tool_calls:
+                        for call in message.tool_calls:
+                            on_status(TOOL_STATUS.get(call.get("name"), "Using a GPA tool..."))
+                    elif message.text and not streamed_text:
+                        # Some model responses arrive in a single completed update.
+                        on_text(message.text)
+                    streamed_text = False
+    return completed
+
+
+async def stream_browser_turn(messages, on_text, on_status):
     async with open_agent() as agent:
-        return await agent.ainvoke({"messages": messages})
+        completed = await stream_turn(agent, messages, None, on_text, on_status)
+    return [*messages, *completed]
 
 
 async def select_thread(agent, name):
@@ -105,7 +157,10 @@ async def show_history(agent, config):
     if not messages:
         print("No saved messages.")
     for message in messages:
-        print(message.pretty_repr())
+        if isinstance(message, HumanMessage):
+            print("You:", message.text)
+        elif isinstance(message, AIMessage) and not message.tool_calls and message.text:
+            print("Assistant:", message.text)
 
 
 async def chat():
@@ -158,15 +213,29 @@ async def chat_loop(agent, memory, name):
             print(f"Deleted the chat for {name}. Your next message starts a fresh chat.")
             continue
 
-        try:
-            result = await agent.ainvoke(
-                {"messages": [HumanMessage(content=user_input)]}, config=config
-            )
-        except (APIError, ValueError) as error:
-            print(f"Request failed ({type(error).__name__}): {error}")
-            continue
+        started_reply = False
 
-        print("\nAssistant:", result["messages"][-1].text)
+        def write_text(text):
+            nonlocal started_reply
+            if not started_reply:
+                print("Assistant: ", end="")
+                started_reply = True
+            print(text, end="", flush=True)
+
+        def write_status(status):
+            nonlocal started_reply
+            if status:
+                if started_reply:
+                    print()
+                    started_reply = False
+                print(status, flush=True)
+
+        try:
+            await stream_turn(agent, [HumanMessage(content=user_input)], config, write_text, write_status)
+        except (APIError, ValueError):
+            print("\nCould not complete your request. Please try again.")
+        else:
+            print()
 
 
 if __name__ == "__main__":
