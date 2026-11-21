@@ -1,5 +1,7 @@
 """Serve the CGPA Guider tools over MCP."""
 
+import os
+
 from fastmcp import FastMCP
 import tools
 
@@ -13,4 +15,10 @@ mcp.tool(tools.get_remaining_credit_hours)
 mcp.tool(tools.save_report)
 
 if __name__ == "__main__":
-    mcp.run(transport="http", host="127.0.0.1", port=8000, path="/mcp")
+    port = int(os.getenv("PORT", "8000"))
+    mcp.run(
+        transport="http",
+        host="0.0.0.0",
+        port=port,
+        path="/mcp",
+    )

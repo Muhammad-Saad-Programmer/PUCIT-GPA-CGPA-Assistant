@@ -73,7 +73,10 @@ async def require_model_reply(request, handler):
 @asynccontextmanager
 async def open_agent(checkpointer=None):
     """Discover remote tools and attach them to the GPA agent."""
-    server = os.getenv("MCP_URL", "http://127.0.0.1:8000/mcp")
+    server = os.getenv(
+        "MCP_URL",
+        "https://pucit-gpa-cgpa-assistant-production.up.railway.app/mcp",
+    )
     tools = await MCPAdapter(server).list_tools()
     async with open_model() as model:
         yield create_agent(

@@ -20,7 +20,7 @@ For chat, create a local `.env` beside `agent.py` using `.env.example` as the te
 
 ```dotenv
 GROQ_API_KEY=your_groq_api_key_here
-MCP_URL=http://127.0.0.1:8000/mcp
+MCP_URL=https://pucit-gpa-cgpa-assistant-production.up.railway.app/mcp
 ```
 
 ## Run the assistant
@@ -102,3 +102,25 @@ Send follow-ups in the same chat. Compare the result and behavior, allowing for 
 This assistant only handles questions about GPA, CGPA, grades, credit hours, and PUCIT course-related information. It does not answer unrelated questions.
 
 Do not share or submit your `.env` file because it contains your private API key.
+
+## Public MCP server deployment
+
+The FastMCP server is deployed on Railway at:
+
+```text
+https://pucit-gpa-cgpa-assistant-production.up.railway.app/mcp
+```
+
+The server reads Railway's `PORT` environment variable and binds to
+`0.0.0.0`. Configure the agent in its local `.env`:
+
+```dotenv
+MCP_URL=https://pucit-gpa-cgpa-assistant-production.up.railway.app/mcp
+```
+
+Test the public server without starting the local server:
+
+```bash
+fastmcp list "https://pucit-gpa-cgpa-assistant-production.up.railway.app/mcp"
+fastmcp call "https://pucit-gpa-cgpa-assistant-production.up.railway.app/mcp" get_remaining_credit_hours current_semester=5
+```
