@@ -1,2 +1,2 @@
-fastmcp>=3,<4
+fastmcp>=4.0.11,<5
 pydantic>=2,<3

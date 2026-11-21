@@ -1,6 +1,7 @@
 """Course data and calculations for the CGPA Guider."""
 
 from math import inf
+from pathlib import Path
 
 from pydantic import SkipValidation
 
@@ -259,7 +260,11 @@ def save_report(filename: SkipValidation[str], content: SkipValidation[str]) -> 
         return "Error: report content cannot be empty"
 
     try:
-        with open(filename, "w", encoding="utf-8") as file:
+        project_dir = Path(__file__).resolve().parent.parent
+        path = project_dir / filename
+        if path.parent == project_dir / "reports":
+            path.parent.mkdir(exist_ok=True)
+        with path.open("w", encoding="utf-8") as file:
             file.write(content)
 
         return f"Report saved successfully to {filename}"

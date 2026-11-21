@@ -1,20 +1,14 @@
+import asyncio
+import os
+from contextlib import asynccontextmanager
+
 from langchain.agents import create_agent
 from langchain.agents.middleware import wrap_model_call
+from langchain.mcp import MCPAdapter
 from langchain.messages import HumanMessage, SystemMessage
 from groq import APIError, BadRequestError
 
-from llm import llm
-
-from tools import (
-    calculate_new_cgpa,
-    calculate_semester_gpa,
-    get_remaining_credit_hours,
-    get_semester_courses,
-    marks_to_grade_points,
-    required_gpa_for_target,
-    save_report,
-)
-
+from llm import open_model
 
 SYSTEM_PROMPT = """
 You are a conversational GPA and CGPA assistant for a PUCIT BS(CS) student.
@@ -46,10 +40,11 @@ explicit request after a result. Start each new conversation empty.
 Redirect questions about course repeats or improvements, curves or relative
 grading, moderation, incomplete grades, withdrawals, freezes, and unrelated
 topics to the supported GPA and course tasks.
+When asked about your capabilities or tools, summarize what you can do for the user in plain, student-friendly language using bullet points. Do not expose raw internal function names (e.g., snake_case tool identifiers). Include 2-3 short example prompts they can try.
 """
 
 @wrap_model_call
-def require_model_reply(request, handler):
+async def require_model_reply(request, handler):
     """Retry only the model step when Groq returns an unusable generation."""
     for attempt in range(2):
         if attempt == 1:
@@ -59,7 +54,7 @@ def require_model_reply(request, handler):
                   "arguments. Otherwise reply to the student in plain language."
             )))
         try:
-            response = handler(request)
+            response = await handler(request)
         except BadRequestError as error:
             body = error.body
             details = body.get("error", body) if isinstance(body, dict) else None
@@ -72,23 +67,32 @@ def require_model_reply(request, handler):
     raise ValueError("Groq returned no usable reply after two attempts. Please retry your question.")
 
 
-agent = create_agent(
-    model=llm,
-    tools=[
-        marks_to_grade_points,
-        calculate_semester_gpa,
-        calculate_new_cgpa,
-        required_gpa_for_target,
-        get_semester_courses,
-        get_remaining_credit_hours,
-        save_report,
-    ],
-    system_prompt=SYSTEM_PROMPT,
-    middleware=[require_model_reply],
-)
+@asynccontextmanager
+async def open_agent():
+    """Discover remote tools and attach them to the GPA agent."""
+    server = os.getenv("MCP_URL", "http://127.0.0.1:8000/mcp")
+    tools = await MCPAdapter(server).list_tools()
+    async with open_model() as model:
+        yield create_agent(
+            model=model,
+            tools=tools,
+            system_prompt=SYSTEM_PROMPT,
+            middleware=[require_model_reply],
+        )
 
 
-def chat():
+async def invoke_turn(messages):
+    """Run a Streamlit turn with discovery and invocation on the same event loop."""
+    async with open_agent() as agent:
+        return await agent.ainvoke({"messages": messages})
+
+
+async def chat():
+    async with open_agent() as agent:
+        await chat_loop(agent)
+
+
+async def chat_loop(agent):
     messages = []
 
     print("GPA/CGPA Assistant")
@@ -106,7 +110,7 @@ def chat():
         if not user_input:
             continue
         try:
-            result = agent.invoke({"messages": [*messages, HumanMessage(content=user_input)]})
+            result = await agent.ainvoke({"messages": [*messages, HumanMessage(content=user_input)]})
         except (APIError, ValueError) as error:
             print(f"Request failed ({type(error).__name__}): {error}")
             continue
@@ -114,5 +118,7 @@ def chat():
         messages = result["messages"]
 
         print("\nAssistant:", messages[-1].text)
+
+
 if __name__ == "__main__":
-    chat()
+    asyncio.run(chat())

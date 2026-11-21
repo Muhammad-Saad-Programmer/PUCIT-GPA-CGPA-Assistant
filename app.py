@@ -1,3 +1,5 @@
+import asyncio
+
 import streamlit as st
 from langchain.messages import AIMessage, HumanMessage
 
@@ -32,11 +34,11 @@ if question:
     st.chat_message("user").markdown(question)
     with st.chat_message("assistant"):
         try:
-            from agent import agent
+            from agent import invoke_turn
 
             messages = st.session_state.messages + [HumanMessage(content=question)]
             with st.spinner("Thinking..."):
-                result = agent.invoke({"messages": messages})
+                result = asyncio.run(invoke_turn(messages))
             st.session_state.messages = result["messages"]
             st.markdown(st.session_state.messages[-1].text)
         except ImportError:
